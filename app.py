@@ -43,12 +43,20 @@ st.markdown(
     margin-bottom: 28px;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 20px;
     box-shadow: 0 6px 18px rgba(0,50,34,0.18);
 }}
 .app-header img {{
-    height: 34px;
+    height: auto;
+    width: 100%;
+    max-width: 180px;
     filter: brightness(0) invert(1);
+    flex-shrink: 0;
+}}
+.app-header .title-block {{
+    flex: 1 1 240px;
+    min-width: 0;
 }}
 .app-header .title-block h1 {{
     color: #FFFFFF;
@@ -56,11 +64,32 @@ st.markdown(
     margin: 0;
     font-weight: 700;
     letter-spacing: 0.02em;
+    line-height: 1.4;
 }}
 .app-header .title-block p {{
     color: {BRAND_LIGHT};
     margin: 4px 0 0 0;
     font-size: 13px;
+    line-height: 1.5;
+}}
+/* スマホ幅では、ロゴとタイトルを縦に並べて中央揃えにする */
+@media (max-width: 640px) {{
+    .app-header {{
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        padding: 22px 18px;
+        gap: 14px;
+    }}
+    .app-header img {{
+        max-width: 140px;
+    }}
+    .app-header .title-block h1 {{
+        font-size: 18px;
+    }}
+    .app-header .title-block p {{
+        font-size: 12px;
+    }}
 }}
 /* ステップ見出し */
 .step-label {{
