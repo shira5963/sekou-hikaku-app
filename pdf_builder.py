@@ -22,6 +22,13 @@ FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 FONT_PATH = os.path.join(FONT_DIR, "ipaexg.ttf")
 FONT_NAME = "JPFont"
 
+# ---- 表紙に記載する会社情報(固定文言) ----
+# 社名・住所・電話番号などを変更したい場合はここを書き換えてください
+COMPANY_NAME = "株式会社インクコーポレーション"
+COMPANY_ADDRESS = "住所：東京都葛飾区立石8-39-6"
+COMPANY_TEL_FAX = "TEL：03-3697-9889　FAX：03-3697-9868"
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+
 
 class ReportPDF(FPDF):
     def __init__(self, property_name):
@@ -81,11 +88,97 @@ def _fit_size(size, max_w, max_h):
     return w * ratio, h * ratio
 
 
-def build_pdf(property_name, pairs, output_path):
+def draw_cover_page(pdf, property_name, cover_photo_path, contact_name, tmp_files):
+    """表紙ページを1ページ描画する
+    property_name: 物件名
+    cover_photo_path: 表紙中央に配置する写真のパス(Noneの場合は写真なし)
+    contact_name: 担当者名(空文字なら「担当：」の行自体を省略)
+
+    レイアウトの考え方：
+    - 写真をA4用紙の上下中央に配置する
+    - 「写真報告書」は写真の3行分上、「物件名」はさらにその2行分上
+    - ロゴ・会社情報は写真の3行分下
+    """
+    pdf.add_page()
+
+    LINE_MM = 8  # 「1行分」の目安の高さ
+
+    # ---- 写真サイズを計算(現在(60%)の120% = 元サイズの72%) ----
+    max_w = (PAGE_W - 2 * MARGIN) * 0.72
+    max_h = 150 * 0.72  # 150mmは基準となる写真エリアの高さ
+    if cover_photo_path:
+        photo_path, size = _load_image_as_temp_png(cover_photo_path, tmp_files)
+        pw, ph = _fit_size(size, max_w, max_h)
+    else:
+        photo_path = None
+        pw, ph = 0, max_h * 0.7  # 写真がない場合も位置決めの基準として仮の高さを使う
+
+    # ---- 写真をA4用紙の上下中央に配置 ----
+    photo_top = PAGE_H / 2 - ph / 2
+    photo_bottom = PAGE_H / 2 + ph / 2
+    if cover_photo_path:
+        photo_x = (PAGE_W - pw) / 2
+        pdf.image(photo_path, x=photo_x, y=photo_top, w=pw, h=ph)
+
+    # ---- 「写真報告書」(写真の3行分上) ----
+    subtitle_h = 14
+    subtitle_top = photo_top - 3 * LINE_MM - subtitle_h
+    pdf.set_xy(0, subtitle_top)
+    pdf.set_font(FONT_NAME, "", 22)
+    pdf.cell(PAGE_W, subtitle_h, "写真報告書", align="C")
+
+    # ---- 「物件名」(写真報告書のさらに2行分上) ----
+    title_h = 12
+    title_top = subtitle_top - 2 * LINE_MM - title_h
+    pdf.set_xy(0, title_top)
+    pdf.set_font(FONT_NAME, "", 20)
+    title_text = f"物件名　{property_name}"
+    pdf.cell(PAGE_W, title_h, title_text, align="C")
+    # 物件名の下に下線を引く(テンプレートに合わせた装飾)
+    text_w = pdf.get_string_width(title_text)
+    line_y = title_top + title_h + 1
+    pdf.set_line_width(0.3)
+    pdf.line((PAGE_W - text_w) / 2, line_y, (PAGE_W + text_w) / 2, line_y)
+
+    # ---- ロゴ(写真の3行分下) ----
+    logo_y = photo_bottom + 3 * LINE_MM
+    if os.path.exists(LOGO_PATH):
+        with Image.open(LOGO_PATH) as logo_im:
+            logo_size = logo_im.size
+        logo_w, logo_h = _fit_size(logo_size, 110, 20)
+        logo_x = (PAGE_W - logo_w) / 2
+        pdf.image(LOGO_PATH, x=logo_x, y=logo_y, w=logo_w, h=logo_h)
+        logo_y += logo_h + 4
+
+    # ---- 会社情報 ----
+    pdf.set_xy(0, logo_y)
+    pdf.set_font(FONT_NAME, "", 13)
+    pdf.cell(PAGE_W, 7, COMPANY_NAME, align="C")
+
+    next_y = logo_y + 7
+    if contact_name.strip():
+        pdf.set_xy(0, next_y)
+        pdf.set_font(FONT_NAME, "", 11)
+        pdf.cell(PAGE_W, 6, f"担当：{contact_name.strip()}", align="C")
+        next_y += 6
+
+    pdf.set_xy(0, next_y)
+    pdf.set_font(FONT_NAME, "", 11)
+    pdf.cell(PAGE_W, 6, COMPANY_ADDRESS, align="C")
+
+    pdf.set_xy(0, next_y + 6)
+    pdf.cell(PAGE_W, 6, COMPANY_TEL_FAX, align="C")
+
+
+def build_pdf(property_name, pairs, output_path, cover_photo_path=None,
+              contact_name="", include_cover=True):
     """
     property_name: str  物件名
     pairs: [(施工前画像パス, 施工後画像パス), ...]  最大枚数の制限なし(自動改ページ)
     output_path: 出力するPDFのパス
+    cover_photo_path: 表紙に載せる写真のパス(Noneなら写真なし)
+    contact_name: 担当者名
+    include_cover: 表紙ページを作るかどうか
     """
     pdf = ReportPDF(property_name)
 
@@ -98,6 +191,9 @@ def build_pdf(property_name, pairs, output_path):
     tmp_files = []  # 最後にまとめて削除する一時PNGファイル
 
     try:
+        if include_cover:
+            draw_cover_page(pdf, property_name, cover_photo_path, contact_name, tmp_files)
+
         content_top = None
         for i, (before, after) in enumerate(pairs):
             pos_in_page = i % PAIRS_PER_PAGE

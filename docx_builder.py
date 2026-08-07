@@ -22,6 +22,12 @@ LABEL_H_MM = 8
 GAP_MM = 20  # 中央(矢印)列の幅
 PAIRS_PER_PAGE = 5
 
+# ---- 表紙に記載する会社情報(固定文言) ----
+COMPANY_NAME = "株式会社インクコーポレーション"
+COMPANY_ADDRESS = "住所：東京都葛飾区立石8-39-6"
+COMPANY_TEL_FAX = "TEL：03-3697-9889　FAX：03-3697-9868"
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+
 
 def _load_image(img_path):
     """画像を読み込み、EXIFの向き情報をピクセルに反映してから返す
@@ -53,11 +59,131 @@ def _set_row_widths(row, widths_mm):
         cell.width = Mm(w)
 
 
-def build_docx(property_name, pairs, output_path):
+def _add_centered_picture(paragraph, img_path, width_mm, height_mm):
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.add_run().add_picture(img_path, width=Mm(width_mm), height=Mm(height_mm))
+
+
+def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_files):
+    """表紙ページ(1ページ目)を作成する
+
+    レイアウトの考え方(pdf_builder.pyと揃えている)：
+    - 写真をA4用紙の上下中央に配置する
+    - 「写真報告書」は写真の3行分上、「物件名」はさらにその2行分上
+    - ロゴ・会社情報は写真の3行分下
+    Wordは絶対座標を指定できないため、段落の space_before/space_after を使って
+    行数分の余白を再現し、さらに先頭の物件名の前に計算した余白を入れることで
+    ブロック全体がページの上下中央に来るように調整している。
+    """
+    usable_w = PAGE_W_MM - 2 * MARGIN_MM
+    mm_to_pt = 2.83465
+    LINE_MM = 8
+    line_pt = LINE_MM * mm_to_pt
+
+    # ---- 写真サイズを計算(現在(60%)の120% = 元サイズの72%) ----
+    BASE_MAX_H_MM = 150
+    max_w = usable_w * 0.72
+    max_h = BASE_MAX_H_MM * 0.72
+    if cover_photo_path:
+        cover_im = _load_image(cover_photo_path)
+        cw, ch = _fit_size(cover_im, max_w, max_h)
+    else:
+        cover_im = None
+        cw, ch = 0, max_h * 0.7  # 写真がない場合も位置決めの基準として仮の高さを使う
+
+    # ---- ロゴサイズを事前に計算(全体の高さ見積もりに使う) ----
+    if os.path.exists(LOGO_PATH):
+        with Image.open(LOGO_PATH) as logo_im:
+            lw, lh = _fit_size(logo_im, 110, 20)
+    else:
+        lw, lh = 0, 0
+
+    # ---- ブロック全体の高さを見積もり、ページ上下中央に来るよう先頭の余白を計算 ----
+    title_line_mm = 9
+    subtitle_line_mm = 9.5
+    company_block_mm = 7 + 5 + 5  # 会社名 + 住所 + TEL/FAX の目安の高さ
+    if contact_name.strip():
+        company_block_mm += 6  # 担当行がある場合はその分を追加
+
+    total_block_mm = (
+        title_line_mm + 2 * LINE_MM + subtitle_line_mm + 3 * LINE_MM
+        + ch + 3 * LINE_MM + lh + 4 + company_block_mm
+    )
+    available_mm = PAGE_H_MM - 2 * MARGIN_MM
+    center_offset_mm = max(0, (available_mm - total_block_mm) / 2)
+
+    # ---- 物件名 ----
+    title_p = doc.add_paragraph()
+    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_p.paragraph_format.space_before = Pt(center_offset_mm * mm_to_pt)
+    title_run = title_p.add_run(f"物件名　{property_name}")
+    title_run.bold = False
+    title_run.underline = True
+    title_run.font.size = Pt(20)
+
+    # ---- 「写真報告書」(物件名の2行分下) ----
+    subtitle_p = doc.add_paragraph()
+    subtitle_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle_p.paragraph_format.space_before = Pt(2 * line_pt)
+    subtitle_run = subtitle_p.add_run("写真報告書")
+    subtitle_run.font.size = Pt(22)
+
+    # ---- 写真(写真報告書の3行分下) ----
+    if cover_photo_path:
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        cover_im.save(tmp.name)
+        tmp.close()
+        tmp_img_files.append(tmp.name)
+        cover_im.close()
+
+        photo_p = doc.add_paragraph()
+        photo_p.paragraph_format.space_before = Pt(3 * line_pt)
+        photo_p.paragraph_format.space_after = Pt(3 * line_pt)
+        _add_centered_picture(photo_p, tmp.name, cw, ch)
+    else:
+        # 写真を入れない場合も、レイアウトの間隔だけは揃えておく
+        spacer_p = doc.add_paragraph()
+        spacer_p.paragraph_format.space_before = Pt(3 * line_pt)
+        spacer_p.paragraph_format.space_after = Pt(3 * line_pt + ch * mm_to_pt)
+
+    # ---- ロゴ ----
+    if os.path.exists(LOGO_PATH):
+        logo_p = doc.add_paragraph()
+        logo_p.paragraph_format.space_after = Pt(4)
+        _add_centered_picture(logo_p, LOGO_PATH, lw, lh)
+
+    # ---- 会社情報 ----
+    name_p = doc.add_paragraph()
+    name_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    name_run = name_p.add_run(COMPANY_NAME)
+    name_run.font.size = Pt(13)
+
+    if contact_name.strip():
+        contact_p = doc.add_paragraph()
+        contact_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        contact_run = contact_p.add_run(f"担当：{contact_name.strip()}")
+        contact_run.font.size = Pt(11)
+
+    addr_p = doc.add_paragraph()
+    addr_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    addr_run = addr_p.add_run(COMPANY_ADDRESS)
+    addr_run.font.size = Pt(11)
+
+    tel_p = doc.add_paragraph()
+    tel_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    tel_run = tel_p.add_run(COMPANY_TEL_FAX)
+    tel_run.font.size = Pt(11)
+
+
+def build_docx(property_name, pairs, output_path, cover_photo_path=None,
+               contact_name="", include_cover=True):
     """
     property_name: str  物件名
     pairs: [(施工前画像パス, 施工後画像パス), ...]
     output_path: 出力する.docxのパス
+    cover_photo_path: 表紙に載せる写真のパス(Noneなら写真なし)
+    contact_name: 担当者名
+    include_cover: 表紙ページを作るかどうか
     """
     doc = Document()
 
@@ -78,11 +204,14 @@ def build_docx(property_name, pairs, output_path):
     tmp_img_files = []  # 最後にまとめて削除する一時ファイル
 
     try:
+        if include_cover:
+            _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_files)
+
         total = len(pairs)
         for page_start in range(0, total, PAIRS_PER_PAGE):
             # ---- 物件名(タイトル) ----
             title_p = doc.add_paragraph()
-            if page_start > 0:
+            if page_start > 0 or include_cover:
                 # 表の直後に doc.add_page_break() で改ページ用の段落を追加すると
                 # 表がページをほぼ埋めている状態と組み合わさり、Wordが
                 # 自動改行と手動改行の両方を行って空白ページが生まれることがある。

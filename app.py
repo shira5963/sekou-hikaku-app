@@ -1,35 +1,194 @@
 """
 施工前&施工後 比較報告書 作成アプリ
 Streamlitで動くWeb画面。写真をアップロードすると自動でペアリングし、
-A4のPDF比較報告書を生成する。
+表紙付きのA4 PDF/Word比較報告書を生成する。
 """
 import streamlit as st
 import os
 import re
+import base64
 import tempfile
 from pdf_builder import build_pdf
 from docx_builder import build_docx
 
-st.set_page_config(page_title="施工前&施工後比較報告書", layout="wide")
-st.title("施工前&施工後 比較報告書 作成アプリ")
+APP_DIR = os.path.dirname(__file__)
+LOGO_PATH = os.path.join(APP_DIR, "assets", "logo.png")
 
-property_name = st.text_input("物件名を入力してください", "")
+st.set_page_config(
+    page_title="施工前&施工後比較報告書",
+    page_icon="🏗️",
+    layout="wide",
+)
 
-col1, col2 = st.columns(2)
-with col1:
-    before_files = st.file_uploader(
-        "施工前の写真をアップロード（複数選択可）",
-        type=["jpg", "jpeg", "png"],
-        accept_multiple_files=True,
-        key="before",
+# ----------------------------------------------------------------------
+# デザイン(カスタムCSS)
+# 会社ロゴの深緑色をブランドカラーとして採用し、カード型のレイアウトに変更
+# ----------------------------------------------------------------------
+BRAND_DARK = "#003222"
+BRAND_MAIN = "#0B4A34"
+BRAND_LIGHT = "#EAF1EC"
+BRAND_ACCENT = "#C9A24B"
+
+st.markdown(
+    f"""<style>
+.stApp {{
+    background-color: #F7F8F6;
+    font-family: 'Yu Gothic', 'Hiragino Sans', 'Meiryo', sans-serif;
+}}
+/* 上部ヘッダーバナー */
+.app-header {{
+    background: linear-gradient(135deg, {BRAND_DARK} 0%, {BRAND_MAIN} 100%);
+    padding: 28px 36px;
+    border-radius: 16px;
+    margin-bottom: 28px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    box-shadow: 0 6px 18px rgba(0,50,34,0.18);
+}}
+.app-header img {{
+    height: 34px;
+    filter: brightness(0) invert(1);
+}}
+.app-header .title-block h1 {{
+    color: #FFFFFF;
+    font-size: 22px;
+    margin: 0;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}}
+.app-header .title-block p {{
+    color: {BRAND_LIGHT};
+    margin: 4px 0 0 0;
+    font-size: 13px;
+}}
+/* ステップ見出し */
+.step-label {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background-color: {BRAND_DARK};
+    color: white;
+    padding: 4px 14px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 10px;
+}}
+/* カード(枠付きコンテナ)のスタイル */
+div[data-testid="stVerticalBlockBorderWrapper"] {{
+    border-radius: 14px !important;
+    border: 1px solid #E2E7E3 !important;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+    background-color: #FFFFFF;
+}}
+/* ボタン */
+.stButton > button, div[data-testid="stDownloadButton"] > button {{
+    border-radius: 8px;
+    font-weight: 600;
+    border: 1px solid {BRAND_DARK};
+}}
+.stButton > button[kind="primary"] {{
+    background-color: {BRAND_DARK};
+    border: 1px solid {BRAND_DARK};
+}}
+.stButton > button[kind="primary"]:hover {{
+    background-color: {BRAND_MAIN};
+    border: 1px solid {BRAND_MAIN};
+}}
+div[data-testid="stDownloadButton"] > button {{
+    background-color: {BRAND_ACCENT};
+    color: #FFFFFF;
+    border: 1px solid {BRAND_ACCENT};
+}}
+/* テキスト入力・ラジオなどのラベル */
+label p {{
+    font-weight: 600 !important;
+    color: #23352C !important;
+}}
+</style>""",
+    unsafe_allow_html=True,
+)
+
+# ----------------------------------------------------------------------
+# ヘッダーバナー(ロゴ + タイトル)
+# ----------------------------------------------------------------------
+if os.path.exists(LOGO_PATH):
+    with open(LOGO_PATH, "rb") as f:
+        logo_b64 = base64.b64encode(f.read()).decode()
+    logo_html = f'<img src="data:image/png;base64,{logo_b64}" alt="logo">'
+else:
+    logo_html = ""
+
+st.markdown(
+    f"""<div class="app-header">{logo_html}<div class="title-block">
+<h1>施工前&施工後 比較報告書 作成アプリ</h1>
+<p>物件写真をアップロードするだけで、表紙付きの比較報告書(PDF / Word)を自動作成します</p>
+</div></div>""",
+    unsafe_allow_html=True,
+)
+
+# ----------------------------------------------------------------------
+# STEP 1：物件名
+# ----------------------------------------------------------------------
+st.markdown('<div class="step-label">STEP 1　物件名</div>', unsafe_allow_html=True)
+with st.container(border=True):
+    property_name = st.text_input(
+        "物件名",
+        "",
+        placeholder="例：◯◯レジデンス101号室",
+        label_visibility="collapsed",
     )
-with col2:
-    after_files = st.file_uploader(
-        "施工後の写真をアップロード（複数選択可）",
-        type=["jpg", "jpeg", "png"],
-        accept_multiple_files=True,
-        key="after",
+
+st.write("")
+
+# ----------------------------------------------------------------------
+# STEP 2：表紙の設定
+# ----------------------------------------------------------------------
+st.markdown('<div class="step-label">STEP 2　表紙の設定</div>', unsafe_allow_html=True)
+with st.container(border=True):
+    cover_choice = st.radio(
+        "表紙の写真",
+        ["表紙あり（写真を追加する）", "表紙なし（写真部分を空白にする）"],
+        horizontal=True,
     )
+    cover_photo_file = None
+    if cover_choice.startswith("表紙あり"):
+        cover_photo_file = st.file_uploader(
+            "表紙中央に配置する写真をアップロード",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=False,
+            key="cover_photo",
+        )
+
+    contact_name = st.text_input(
+        "担当者名（表紙下部に「担当：〇〇」として記載されます／空欄可）",
+        "",
+        placeholder="例：山田太郎",
+    )
+
+st.write("")
+
+# ----------------------------------------------------------------------
+# STEP 3：施工前・施工後の写真
+# ----------------------------------------------------------------------
+st.markdown('<div class="step-label">STEP 3　施工前・施工後の写真</div>', unsafe_allow_html=True)
+with st.container(border=True):
+    col1, col2 = st.columns(2)
+    with col1:
+        before_files = st.file_uploader(
+            "施工前の写真をアップロード（複数選択可）",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            key="before",
+        )
+    with col2:
+        after_files = st.file_uploader(
+            "施工後の写真をアップロード（複数選択可）",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            key="after",
+        )
 
 
 def natural_key(name):
@@ -38,87 +197,171 @@ def natural_key(name):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name)]
 
 
+st.write("")
+
 if before_files and after_files:
     before_sorted = sorted(before_files, key=lambda f: natural_key(f.name))
     after_sorted = sorted(after_files, key=lambda f: natural_key(f.name))
+    after_names = [f.name for f in after_sorted]
 
-    n = min(len(before_sorted), len(after_sorted))
+    n = len(before_sorted)
     if len(before_sorted) != len(after_sorted):
         st.warning(
             f"施工前({len(before_sorted)}枚)と施工後({len(after_sorted)}枚)の枚数が一致していません。"
-            f"ファイル名順に先頭から{n}組をペアとして扱います。"
+            "自動では先頭から順にペアにしていますが、下の「変更」欄で正しい組み合わせに直せます。"
         )
 
-    st.subheader("ペアリング結果の確認")
-    st.caption(
-        "同じ場所の写真同士がペアになっているか確認してください。"
-        "ズレている場合はファイル名の連番を揃えて再アップロードしてください。"
-    )
+    # ---- ペアリング状態をセッションに保持 ----
+    # アップロードされたファイルの組み合わせが変わったら、状態をリセットする
+    sig = (tuple(f.name for f in before_sorted), tuple(after_names))
+    if st.session_state.get("pairing_sig") != sig:
+        # 前回と異なる写真の組み合わせがアップロードされた場合、
+        # 古いプルダウンの選択状態が残らないよう一度クリアする
+        for key in list(st.session_state.keys()):
+            if key.startswith("after_select_"):
+                del st.session_state[key]
+        st.session_state["pairing_sig"] = sig
+        st.session_state["pair_order"] = list(range(n))  # 表示順(施工前のインデックス)
+        st.session_state["after_choice"] = {
+            i: min(i, len(after_sorted) - 1) for i in range(n)
+        }  # 施工前インデックス -> 施工後インデックス
 
-    pairs_preview = list(zip(before_sorted[:n], after_sorted[:n]))
-    for i, (b, a) in enumerate(pairs_preview, start=1):
-        c1, c2, c3 = st.columns([4, 1, 4])
-        with c1:
-            st.image(b, caption=f"{i}. 施工前: {b.name}", use_container_width=True)
-        with c2:
-            st.markdown(
-                "<h2 style='text-align:center;margin-top:60px;'>→</h2>",
-                unsafe_allow_html=True,
-            )
-        with c3:
-            st.image(a, caption=f"{i}. 施工後: {a.name}", use_container_width=True)
+    order = st.session_state["pair_order"]
+    after_choice = st.session_state["after_choice"]
 
-    st.divider()
+    # 重複チェック(同じ施工後写真が複数のペアで使われていないか)
+    from collections import Counter
+    usage_count = Counter(after_choice.values())
 
-    st.subheader("報告書の作成")
-    btn_col1, btn_col2 = st.columns(2)
-    with btn_col1:
-        make_pdf = st.button("PDFで作成", type="primary", use_container_width=True)
-    with btn_col2:
-        make_docx = st.button("Wordで作成", use_container_width=True)
+    st.markdown('<div class="step-label">STEP 4　ペアリング結果の確認・修正</div>', unsafe_allow_html=True)
+    with st.expander(f"{n}組のペアを確認する（同じ場所の写真になっているか確認してください）", expanded=True):
+        st.caption(
+            "違う場所の写真がペアになっている場合は「施工後の写真」のプルダウンから正しい写真を選び直せます。"
+            "表示順（報告書のページ順）を変えたい場合は ▲▼ ボタンで入れ替えられます。"
+        )
+        for display_pos, before_idx in enumerate(order):
+            b = before_sorted[before_idx]
+            current_after_idx = after_choice[before_idx]
+            duplicated = usage_count[current_after_idx] > 1
 
-    if make_pdf or make_docx:
-        if not property_name.strip():
-            st.error("物件名を入力してください。")
-        else:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                # アップロードされた写真を一時フォルダに保存(PDF/Word共通で使う)
-                pair_paths = []
-                for i, (b, a) in enumerate(pairs_preview):
-                    b_path = os.path.join(tmpdir, f"before_{i}_{b.name}")
-                    a_path = os.path.join(tmpdir, f"after_{i}_{a.name}")
-                    with open(b_path, "wb") as f:
-                        f.write(b.getbuffer())
-                    with open(a_path, "wb") as f:
-                        f.write(a.getbuffer())
-                    pair_paths.append((b_path, a_path))
-
-                if make_pdf:
-                    with st.spinner("PDFを生成しています..."):
-                        pdf_path = os.path.join(tmpdir, "report.pdf")
-                        build_pdf(property_name, pair_paths, pdf_path)
-                        with open(pdf_path, "rb") as f:
-                            pdf_bytes = f.read()
-                    st.success("PDF報告書を作成しました。")
-                    st.download_button(
-                        "PDFをダウンロード",
-                        data=pdf_bytes,
-                        file_name=f"{property_name}_比較報告書.pdf",
-                        mime="application/pdf",
+            row_box = st.container(border=True)
+            with row_box:
+                c1, c2, c3, c4 = st.columns([4, 3, 4, 1])
+                with c1:
+                    st.image(b, caption=f"{display_pos + 1}. 施工前: {b.name}", use_container_width=True)
+                with c2:
+                    st.markdown(
+                        f"<div style='text-align:center;margin-top:70px;font-size:26px;color:{BRAND_DARK};'>→</div>",
+                        unsafe_allow_html=True,
                     )
-
-                if make_docx:
-                    with st.spinner("Wordファイルを生成しています..."):
-                        docx_path = os.path.join(tmpdir, "report.docx")
-                        build_docx(property_name, pair_paths, docx_path)
-                        with open(docx_path, "rb") as f:
-                            docx_bytes = f.read()
-                    st.success("Word報告書を作成しました。")
-                    st.download_button(
-                        "Wordファイルをダウンロード",
-                        data=docx_bytes,
-                        file_name=f"{property_name}_比較報告書.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    selected_name = st.selectbox(
+                        "施工後の写真",
+                        options=after_names,
+                        index=current_after_idx,
+                        key=f"after_select_{before_idx}",
                     )
+                    new_after_idx = after_names.index(selected_name)
+                    if new_after_idx != after_choice[before_idx]:
+                        after_choice[before_idx] = new_after_idx
+                        st.rerun()
+                    if duplicated:
+                        st.caption("⚠️ 他のペアと同じ施工後写真が選ばれています")
+                with c3:
+                    a = after_sorted[current_after_idx]
+                    st.image(a, caption=f"{display_pos + 1}. 施工後: {a.name}", use_container_width=True)
+                with c4:
+                    st.write("")
+                    if st.button("▲", key=f"up_{before_idx}", disabled=(display_pos == 0), use_container_width=True):
+                        new_order = order.copy()
+                        new_order[display_pos - 1], new_order[display_pos] = (
+                            new_order[display_pos],
+                            new_order[display_pos - 1],
+                        )
+                        st.session_state["pair_order"] = new_order
+                        st.rerun()
+                    if st.button("▼", key=f"down_{before_idx}", disabled=(display_pos == len(order) - 1), use_container_width=True):
+                        new_order = order.copy()
+                        new_order[display_pos + 1], new_order[display_pos] = (
+                            new_order[display_pos],
+                            new_order[display_pos + 1],
+                        )
+                        st.session_state["pair_order"] = new_order
+                        st.rerun()
+
+    pairs_preview = [(before_sorted[idx], after_sorted[after_choice[idx]]) for idx in order]
+
+    st.write("")
+    st.markdown('<div class="step-label">STEP 5　報告書の作成</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            make_pdf = st.button("📄 PDFで作成", type="primary", use_container_width=True)
+        with btn_col2:
+            make_docx = st.button("📝 Wordで作成", use_container_width=True)
+
+        if make_pdf or make_docx:
+            if not property_name.strip():
+                st.error("STEP 1で物件名を入力してください。")
+            else:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    # アップロードされた写真を一時フォルダに保存(PDF/Word共通で使う)
+                    pair_paths = []
+                    for i, (b, a) in enumerate(pairs_preview):
+                        b_path = os.path.join(tmpdir, f"before_{i}_{b.name}")
+                        a_path = os.path.join(tmpdir, f"after_{i}_{a.name}")
+                        with open(b_path, "wb") as f:
+                            f.write(b.getbuffer())
+                        with open(a_path, "wb") as f:
+                            f.write(a.getbuffer())
+                        pair_paths.append((b_path, a_path))
+
+                    # 表紙写真の保存(選択されている場合のみ)
+                    cover_photo_path = None
+                    if cover_photo_file is not None:
+                        cover_photo_path = os.path.join(tmpdir, f"cover_{cover_photo_file.name}")
+                        with open(cover_photo_path, "wb") as f:
+                            f.write(cover_photo_file.getbuffer())
+
+                    if make_pdf:
+                        with st.spinner("PDFを生成しています..."):
+                            pdf_path = os.path.join(tmpdir, "report.pdf")
+                            build_pdf(
+                                property_name,
+                                pair_paths,
+                                pdf_path,
+                                cover_photo_path=cover_photo_path,
+                                contact_name=contact_name,
+                                include_cover=True,
+                            )
+                            with open(pdf_path, "rb") as f:
+                                pdf_bytes = f.read()
+                        st.success("PDF報告書を作成しました。")
+                        st.download_button(
+                            "⬇ PDFをダウンロード",
+                            data=pdf_bytes,
+                            file_name=f"{property_name}_比較報告書.pdf",
+                            mime="application/pdf",
+                        )
+
+                    if make_docx:
+                        with st.spinner("Wordファイルを生成しています..."):
+                            docx_path = os.path.join(tmpdir, "report.docx")
+                            build_docx(
+                                property_name,
+                                pair_paths,
+                                docx_path,
+                                cover_photo_path=cover_photo_path,
+                                contact_name=contact_name,
+                                include_cover=True,
+                            )
+                            with open(docx_path, "rb") as f:
+                                docx_bytes = f.read()
+                        st.success("Word報告書を作成しました。")
+                        st.download_button(
+                            "⬇ Wordファイルをダウンロード",
+                            data=docx_bytes,
+                            file_name=f"{property_name}_比較報告書.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        )
 else:
-    st.info("施工前・施工後、それぞれの写真をアップロードしてください。")
+    st.info("STEP 3で、施工前・施工後それぞれの写真をアップロードすると、ペアリング結果と作成ボタンが表示されます。")
