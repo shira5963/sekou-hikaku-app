@@ -185,7 +185,9 @@ with st.container(border=True):
     if cover_choice.startswith("表紙あり"):
         cover_photo_file = st.file_uploader(
             "表紙中央に配置する写真をアップロード",
-            type=["jpg", "jpeg", "png"],
+            # type=[...]で拡張子を絞り込むと、Android端末でアップロード時に
+            # 「フォト」アプリが選択肢から消えてしまうことがあるため、
+            # あえて絞り込まず、アップロード後にPython側でチェックする
             accept_multiple_files=False,
             key="cover_photo",
         )
@@ -207,17 +209,28 @@ with st.container(border=True):
     with col1:
         before_files = st.file_uploader(
             "施工前の写真をアップロード（複数選択可）",
-            type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
             key="before",
         )
     with col2:
         after_files = st.file_uploader(
             "施工後の写真をアップロード（複数選択可）",
-            type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
             key="after",
         )
+
+
+ALLOWED_EXT = (".jpg", ".jpeg", ".png")
+
+
+def filter_image_files(files):
+    """拡張子が画像(jpg/jpeg/png)のものだけを残し、それ以外は除外する。
+    (アップロード欄側で拡張子を絞り込まなくなったため、ここでチェックする)"""
+    if not files:
+        return [], []
+    valid = [f for f in files if f.name.lower().endswith(ALLOWED_EXT)]
+    invalid = [f.name for f in files if not f.name.lower().endswith(ALLOWED_EXT)]
+    return valid, invalid
 
 
 def natural_key(name):
@@ -227,6 +240,21 @@ def natural_key(name):
 
 
 st.write("")
+
+cover_photo_file, cover_invalid = filter_image_files(
+    [cover_photo_file] if cover_photo_file is not None else []
+)
+cover_photo_file = cover_photo_file[0] if cover_photo_file else None
+if cover_invalid:
+    st.error(f"表紙の写真は画像ファイル(jpg/jpeg/png)のみアップロードできます：{cover_invalid[0]}")
+
+before_files, before_invalid = filter_image_files(before_files)
+after_files, after_invalid = filter_image_files(after_files)
+if before_invalid or after_invalid:
+    st.error(
+        "画像ファイル(jpg/jpeg/png)以外はアップロードできません。"
+        f"該当ファイル：{', '.join(before_invalid + after_invalid)}"
+    )
 
 if before_files and after_files:
     before_sorted = sorted(before_files, key=lambda f: natural_key(f.name))
