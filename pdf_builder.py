@@ -1,24 +1,32 @@
 """
 施工前・施工後 比較報告書 PDF生成モジュール
 A4縦 / 1ページに5組(10枚)のペア写真を配置する
+さらに「施工中画像・その他」ページ(1ページ最大20枚、4枚×5段)にも対応する
 """
 from fpdf import FPDF
 from PIL import Image, ImageOps
 import os
 import tempfile
 
+from layout_utils import (
+    PAGE_W_MM as PAGE_W,
+    PAGE_H_MM as PAGE_H,
+    MARGIN_MM as MARGIN,
+    COMMENT_BOX_H_MM as COMMENT_BOX_H,
+    COMMENT_GAP_MM as COMMENT_GAP,
+    COMMENT_FONT_PT as COMMENT_FONT_SIZE,
+    GAP_MM,
+    EXTRA_PHOTOS_PER_ROW,
+    EXTRA_GAP_MM,
+    EXTRA_COL_W_MM,
+    EXTRA_ROWS_PER_PAGE,
+    EXTRA_PHOTOS_PER_PAGE,
+)
+
 # ---- レイアウト定数 (mm) ----
-PAGE_W = 210
-PAGE_H = 297
-MARGIN = 10
 TITLE_H = 15
 LABEL_H = 8
 PAIRS_PER_PAGE = 5
-
-# ---- 記入欄(コメント欄)の設定 ----
-COMMENT_BOX_H = 11  # mm 記入欄の高さ
-COMMENT_GAP = 1.5  # mm 写真と記入欄の間隔
-COMMENT_FONT_SIZE = 10.5  # 記入欄ラベルのフォントサイズ
 
 # ---- 画像圧縮の設定 ----
 # 写真は実際にA4上へ配置されるサイズを基準に、印刷でも見た目がほぼ変わらない
@@ -53,10 +61,10 @@ class ReportPDF(FPDF):
             )
         self.add_font(FONT_NAME, "", FONT_PATH, uni=True)
 
-    def draw_title(self):
+    def draw_title(self, text=None):
         self.set_xy(0, MARGIN)
         self.set_font(FONT_NAME, "", 16)
-        self.cell(PAGE_W, TITLE_H, self.property_name, align="C")
+        self.cell(PAGE_W, TITLE_H, text if text is not None else self.property_name, align="C")
 
     def draw_page_labels(self, top_y, col_w, gap):
         self.set_font(FONT_NAME, "", 12)
@@ -94,11 +102,9 @@ def _prepare_image_for_pdf(img_path, max_w_mm, max_h_mm, tmp_files,
 
     disp_w, disp_h = _fit_size(im.size, max_w_mm, max_h_mm)
 
-    # 表示サイズ(mm)を、指定dpiで必要なピクセル数に変換
     target_px_w = max(1, round(disp_w / 25.4 * dpi))
     target_px_h = max(1, round(disp_h / 25.4 * dpi))
 
-    # 元画像がそれより大きい場合のみ縮小する(小さい画像を無理に拡大しない)
     if im.size[0] > target_px_w or im.size[1] > target_px_h:
         im = im.resize((target_px_w, target_px_h), Image.LANCZOS)
 
@@ -111,16 +117,16 @@ def _prepare_image_for_pdf(img_path, max_w_mm, max_h_mm, tmp_files,
     return tmp.name, (disp_w, disp_h)
 
 
-def _draw_comment_box(pdf, x, y, w, h):
-    """写真下の記入欄(枠線のみの空欄)を描画する"""
+def _draw_comment_box(pdf, x, y, w, text=""):
+    """写真下の記入欄を描画する(枠線+入力されたコメントがあれば1行で表示)"""
     pdf.set_draw_color(180, 180, 180)
     pdf.set_line_width(0.2)
-    pdf.rect(x, y, w, h)
-    pdf.set_font(FONT_NAME, "", COMMENT_FONT_SIZE)
-    pdf.set_text_color(150, 150, 150)
-    pdf.set_xy(x + 2, y + 1)
-    pdf.cell(w - 4, 5, "記入欄：", align="L")
-    # 色を元に戻しておく(以降の描画に影響しないように)
+    pdf.rect(x, y, w, COMMENT_BOX_H)
+    if text:
+        pdf.set_font(FONT_NAME, "", COMMENT_FONT_SIZE)
+        pdf.set_text_color(30, 30, 30)
+        pdf.set_xy(x + 2, y + (COMMENT_BOX_H - 5) / 2)
+        pdf.cell(w - 4, 5, text, align="L")
     pdf.set_draw_color(0, 0, 0)
     pdf.set_text_color(0, 0, 0)
 
@@ -206,20 +212,60 @@ def draw_cover_page(pdf, property_name, cover_photo_path, contact_name, tmp_file
     pdf.cell(PAGE_W, 6, COMPANY_TEL_FAX, align="C")
 
 
+def draw_extra_photos_pages(pdf, title, photo_items, tmp_files):
+    """「施工中画像・その他」ページを描画する(4枚×5段 = 1ページ最大20枚)
+    photo_items: [(写真パス, コメント文字列), ...]
+    """
+    if not photo_items:
+        return
+
+    row_h2 = (PAGE_H - 2 * MARGIN - TITLE_H) / EXTRA_ROWS_PER_PAGE
+    photo_zone_h2 = row_h2 - COMMENT_GAP - COMMENT_BOX_H
+    pad = 2
+
+    content_top2 = None
+    for i, (photo_path_src, comment) in enumerate(photo_items):
+        pos_in_page = i % EXTRA_PHOTOS_PER_PAGE
+        if pos_in_page == 0:
+            pdf.add_page()
+            pdf.set_xy(0, MARGIN)
+            pdf.set_font(FONT_NAME, "", 16)
+            pdf.cell(PAGE_W, TITLE_H, title, align="C")
+            content_top2 = MARGIN + TITLE_H
+
+        row_idx = pos_in_page // EXTRA_PHOTOS_PER_ROW
+        col_idx = pos_in_page % EXTRA_PHOTOS_PER_ROW
+        row_top = content_top2 + row_idx * row_h2
+        col_x = MARGIN + col_idx * (EXTRA_COL_W_MM + EXTRA_GAP_MM)
+
+        img_path, (iw, ih) = _prepare_image_for_pdf(
+            photo_path_src, EXTRA_COL_W_MM - 2 * pad, photo_zone_h2 - 2 * pad, tmp_files
+        )
+        ix = col_x + (EXTRA_COL_W_MM - iw) / 2
+        iy = row_top + (photo_zone_h2 - ih) / 2
+        pdf.image(img_path, x=ix, y=iy, w=iw, h=ih)
+
+        box_y = row_top + photo_zone_h2 + COMMENT_GAP
+        _draw_comment_box(pdf, col_x, box_y, EXTRA_COL_W_MM, comment)
+
+
 def build_pdf(property_name, pairs, output_path, cover_photo_path=None,
-              contact_name="", include_cover=True):
+              contact_name="", include_cover=True,
+              extra_title="施工中画像", extra_photos=None):
     """
     property_name: str  物件名
-    pairs: [(施工前画像パス, 施工後画像パス), ...]  最大枚数の制限なし(自動改ページ)
+    pairs: [(施工前画像パス, 施工後画像パス, 施工前コメント, 施工後コメント), ...]
     output_path: 出力するPDFのパス
     cover_photo_path: 表紙に載せる写真のパス(Noneなら写真なし)
     contact_name: 担当者名
     include_cover: 表紙ページを作るかどうか
+    extra_title: 「施工中画像・その他」ページの見出し
+    extra_photos: [(写真パス, コメント文字列), ...] (Noneまたは空リストならページ自体作らない)
     """
     pdf = ReportPDF(property_name)
 
     usable_w = PAGE_W - 2 * MARGIN
-    gap = 20  # mm 矢印を描くための中央スペース
+    gap = GAP_MM  # mm 矢印を描くための中央スペース
     col_w = (usable_w - gap) / 2
     row_h = (PAGE_H - 2 * MARGIN - TITLE_H - LABEL_H) / PAIRS_PER_PAGE
     pad = 2  # mm 画像とセル枠の間の余白
@@ -234,7 +280,11 @@ def build_pdf(property_name, pairs, output_path, cover_photo_path=None,
             draw_cover_page(pdf, property_name, cover_photo_path, contact_name, tmp_files)
 
         content_top = None
-        for i, (before, after) in enumerate(pairs):
+        for i, pair in enumerate(pairs):
+            before, after = pair[0], pair[1]
+            before_comment = pair[2] if len(pair) > 2 else ""
+            after_comment = pair[3] if len(pair) > 3 else ""
+
             pos_in_page = i % PAIRS_PER_PAGE
             if pos_in_page == 0:
                 pdf.add_page()
@@ -272,8 +322,11 @@ def build_pdf(property_name, pairs, output_path, cover_photo_path=None,
 
             # 記入欄(施工前・施工後それぞれの写真の下)
             box_y = row_top + photo_zone_h + COMMENT_GAP
-            _draw_comment_box(pdf, MARGIN, box_y, col_w, COMMENT_BOX_H)
-            _draw_comment_box(pdf, MARGIN + col_w + gap, box_y, col_w, COMMENT_BOX_H)
+            _draw_comment_box(pdf, MARGIN, box_y, col_w, before_comment)
+            _draw_comment_box(pdf, MARGIN + col_w + gap, box_y, col_w, after_comment)
+
+        if extra_photos:
+            draw_extra_photos_pages(pdf, extra_title or "施工中画像", extra_photos, tmp_files)
 
         pdf.output(output_path)
     finally:

@@ -1,35 +1,41 @@
 """
 施工前・施工後 比較報告書 Word(.docx)生成モジュール
 pdf_builder.py と同じレイアウト仕様(A4縦/1ページ5組)をWordの表で再現する
+さらに「施工中画像・その他」ページ(1ページ最大20枚、4枚×5段)にも対応する
 """
 import os
+import math
 import tempfile
 
 from docx import Document
-from docx.shared import Mm, Pt, RGBColor
+from docx.shared import Mm, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from PIL import Image, ImageOps
 
+from layout_utils import (
+    PAGE_W_MM,
+    PAGE_H_MM,
+    MARGIN_MM,
+    COMMENT_BOX_H_MM,
+    COMMENT_GAP_MM,
+    COMMENT_FONT_PT,
+    GAP_MM,
+    EXTRA_PHOTOS_PER_ROW,
+    EXTRA_GAP_MM,
+    EXTRA_COL_W_MM,
+    EXTRA_ROWS_PER_PAGE,
+    EXTRA_PHOTOS_PER_PAGE,
+)
+
 # ---- レイアウト定数 (mm) : pdf_builder.py と揃えている ----
-PAGE_W_MM = 210
-PAGE_H_MM = 297
-MARGIN_MM = 10
 TITLE_H_MM = 15
 LABEL_H_MM = 8
-GAP_MM = 20  # 中央(矢印)列の幅
 PAIRS_PER_PAGE = 5
 
-# ---- 記入欄(コメント欄)の設定 : pdf_builder.py と揃えている ----
-COMMENT_BOX_H_MM = 11
-COMMENT_GAP_MM = 1.5
-COMMENT_FONT_PT = 10.5
-
 # ---- 画像圧縮の設定 ----
-# 写真は実際にWord上へ配置されるサイズを基準に、印刷でも見た目がほぼ変わらない
-# 解像度(200dpi)まで縮小してからJPEGで保存し、ファイルサイズを大幅に削減する
 IMAGE_DPI = 200
 JPEG_QUALITY = 85
 
@@ -53,8 +59,7 @@ def _load_image(img_path):
 
 
 def _fit_size(size_or_im, max_w, max_h):
-    """画像の縦横比を保ったまま、指定した枠(max_w x max_h)に収まるサイズを計算する
-    size_or_im: (幅, 高さ)のタプル、またはPIL Imageオブジェクト"""
+    """画像の縦横比を保ったまま、指定した枠(max_w x max_h)に収まるサイズを計算する"""
     w, h = size_or_im.size if hasattr(size_or_im, "size") else size_or_im
     ratio = min(max_w / w, max_h / h)
     return w * ratio, h * ratio
@@ -104,7 +109,7 @@ def _add_centered_picture(paragraph, img_path, width_mm, height_mm):
 
 
 def _add_paragraph_bottom_border(paragraph):
-    """段落の下部に罫線(記入用の線)を引く"""
+    """段落の下部に罫線(記入欄の下線)を引く"""
     pPr = paragraph._p.get_or_add_pPr()
     pBdr = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
@@ -116,17 +121,20 @@ def _add_paragraph_bottom_border(paragraph):
     pPr.append(pBdr)
 
 
-def _add_comment_area(cell, box_h_mm):
-    """写真の下に記入欄(ラベル+罫線の空欄)を追加する"""
+def _add_comment_area(cell, box_h_mm, comment_text=""):
+    """写真の下に記入欄(入力されたコメント+下線)を追加する"""
     p = cell.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.LEFT
     p.paragraph_format.space_before = Pt(COMMENT_GAP_MM * MM_TO_PT)
-    run = p.add_run("記入欄：")
-    run.font.size = Pt(COMMENT_FONT_PT)
-    run.font.color.rgb = RGBColor(150, 150, 150)
+    if comment_text:
+        run = p.add_run(comment_text)
+        run.font.size = Pt(COMMENT_FONT_PT)
+    else:
+        # 空でも罫線の高さを保つため、幅ゼロの見えない文字を入れておく
+        run = p.add_run(" ")
+        run.font.size = Pt(COMMENT_FONT_PT)
     _add_paragraph_bottom_border(p)
 
-    # ラベル行だけでは箱として物足りないため、残りの高さ分を空白として確保する
     label_line_mm = 5
     remaining_mm = box_h_mm - label_line_mm
     if remaining_mm > 0:
@@ -140,15 +148,11 @@ def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_
     - 写真をA4用紙の上下中央に配置する
     - 「写真報告書」は写真の3行分上、「物件名」はさらにその2行分上
     - ロゴ・会社情報は写真の3行分下
-    Wordは絶対座標を指定できないため、段落の space_before/space_after を使って
-    行数分の余白を再現し、さらに先頭の物件名の前に計算した余白を入れることで
-    ブロック全体がページの上下中央に来るように調整している。
     """
     usable_w = PAGE_W_MM - 2 * MARGIN_MM
     LINE_MM = 8
     line_pt = LINE_MM * MM_TO_PT
 
-    # ---- 写真サイズを計算(現在(60%)の120% = 元サイズの72%) ----
     BASE_MAX_H_MM = 150
     max_w = usable_w * 0.72
     max_h = BASE_MAX_H_MM * 0.72
@@ -156,21 +160,19 @@ def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_
         photo_path, (cw, ch) = _prepare_image_for_docx(cover_photo_path, max_w, max_h, tmp_img_files)
     else:
         photo_path = None
-        cw, ch = 0, max_h * 0.7  # 写真がない場合も位置決めの基準として仮の高さを使う
+        cw, ch = 0, max_h * 0.7
 
-    # ---- ロゴサイズを事前に計算(全体の高さ見積もりに使う) ----
     if os.path.exists(LOGO_PATH):
         with Image.open(LOGO_PATH) as logo_im:
             lw, lh = _fit_size(logo_im, 110, 20)
     else:
         lw, lh = 0, 0
 
-    # ---- ブロック全体の高さを見積もり、ページ上下中央に来るよう先頭の余白を計算 ----
     title_line_mm = 9
     subtitle_line_mm = 9.5
-    company_block_mm = 7 + 5 + 5  # 会社名 + 住所 + TEL/FAX の目安の高さ
+    company_block_mm = 7 + 5 + 5
     if contact_name.strip():
-        company_block_mm += 6  # 担当行がある場合はその分を追加
+        company_block_mm += 6
 
     total_block_mm = (
         title_line_mm + 2 * LINE_MM + subtitle_line_mm + 3 * LINE_MM
@@ -179,7 +181,6 @@ def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_
     available_mm = PAGE_H_MM - 2 * MARGIN_MM
     center_offset_mm = max(0, (available_mm - total_block_mm) / 2)
 
-    # ---- 物件名 ----
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title_p.paragraph_format.space_before = Pt(center_offset_mm * MM_TO_PT)
@@ -188,32 +189,27 @@ def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_
     title_run.underline = True
     title_run.font.size = Pt(20)
 
-    # ---- 「写真報告書」(物件名の2行分下) ----
     subtitle_p = doc.add_paragraph()
     subtitle_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     subtitle_p.paragraph_format.space_before = Pt(2 * line_pt)
     subtitle_run = subtitle_p.add_run("写真報告書")
     subtitle_run.font.size = Pt(22)
 
-    # ---- 写真(写真報告書の3行分下) ----
     if cover_photo_path:
         photo_p = doc.add_paragraph()
         photo_p.paragraph_format.space_before = Pt(3 * line_pt)
         photo_p.paragraph_format.space_after = Pt(3 * line_pt)
         _add_centered_picture(photo_p, photo_path, cw, ch)
     else:
-        # 写真を入れない場合も、レイアウトの間隔だけは揃えておく
         spacer_p = doc.add_paragraph()
         spacer_p.paragraph_format.space_before = Pt(3 * line_pt)
         spacer_p.paragraph_format.space_after = Pt(3 * line_pt + ch * MM_TO_PT)
 
-    # ---- ロゴ ----
     if os.path.exists(LOGO_PATH):
         logo_p = doc.add_paragraph()
         logo_p.paragraph_format.space_after = Pt(4)
         _add_centered_picture(logo_p, LOGO_PATH, lw, lh)
 
-    # ---- 会社情報 ----
     name_p = doc.add_paragraph()
     name_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     name_run = name_p.add_run(COMPANY_NAME)
@@ -236,15 +232,70 @@ def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_
     tel_run.font.size = Pt(11)
 
 
+def _add_extra_photos_pages(doc, title, photo_items, tmp_img_files, first_page_break):
+    """「施工中画像・その他」ページを作成する(4枚×5段 = 1ページ最大20枚)
+    photo_items: [(写真パス, コメント文字列), ...]
+    first_page_break: 最初のページの前に改ページを入れるかどうか
+    """
+    if not photo_items:
+        return
+
+    row_h2 = (PAGE_H_MM - 2 * MARGIN_MM - TITLE_H_MM) / EXTRA_ROWS_PER_PAGE
+    photo_zone_h2 = row_h2 - COMMENT_GAP_MM - COMMENT_BOX_H_MM
+    pad = 2
+    widths2 = [EXTRA_COL_W_MM] * EXTRA_PHOTOS_PER_ROW
+
+    total = len(photo_items)
+    for page_start in range(0, total, EXTRA_PHOTOS_PER_PAGE):
+        title_p = doc.add_paragraph()
+        if page_start > 0 or first_page_break:
+            title_p.paragraph_format.page_break_before = True
+        title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        title_run = title_p.add_run(title)
+        title_run.bold = True
+        title_run.font.size = Pt(16)
+
+        chunk = photo_items[page_start: page_start + EXTRA_PHOTOS_PER_PAGE]
+        n_rows = math.ceil(len(chunk) / EXTRA_PHOTOS_PER_ROW)
+
+        table = doc.add_table(rows=0, cols=EXTRA_PHOTOS_PER_ROW)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = False
+
+        for r in range(n_rows):
+            row = table.add_row()
+            row.height = Mm(row_h2)
+            row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+            _set_row_widths(row, widths2)
+            cells = row.cells
+
+            for c in range(EXTRA_PHOTOS_PER_ROW):
+                idx = r * EXTRA_PHOTOS_PER_ROW + c
+                if idx >= len(chunk):
+                    continue  # 最後の行で埋まらない分は空セルのままにする
+                photo_path_src, comment = chunk[idx]
+
+                img_path, (iw, ih) = _prepare_image_for_docx(
+                    photo_path_src, EXTRA_COL_W_MM - 2 * pad, photo_zone_h2 - 2 * pad, tmp_img_files
+                )
+                p_img = cells[c].paragraphs[0]
+                _add_centered_picture(p_img, img_path, iw, ih)
+                _add_comment_area(cells[c], COMMENT_BOX_H_MM, comment)
+                _set_vertical_center(cells[c])
+
+
 def build_docx(property_name, pairs, output_path, cover_photo_path=None,
-               contact_name="", include_cover=True):
+               contact_name="", include_cover=True,
+               extra_title="施工中画像", extra_photos=None):
     """
     property_name: str  物件名
-    pairs: [(施工前画像パス, 施工後画像パス), ...]
+    pairs: [(施工前画像パス, 施工後画像パス, 施工前コメント, 施工後コメント), ...]
     output_path: 出力する.docxのパス
     cover_photo_path: 表紙に載せる写真のパス(Noneなら写真なし)
     contact_name: 担当者名
     include_cover: 表紙ページを作るかどうか
+    extra_title: 「施工中画像・その他」ページの見出し
+    extra_photos: [(写真パス, コメント文字列), ...] (Noneまたは空リストならページ自体作らない)
     """
     doc = Document()
 
@@ -262,10 +313,9 @@ def build_docx(property_name, pairs, output_path, cover_photo_path=None,
     pad = 2
     widths = [col_w, GAP_MM, col_w]
 
-    # 各行の高さのうち、下部を記入欄に充て、残りを写真エリアとする
     photo_zone_h = row_h - COMMENT_GAP_MM - COMMENT_BOX_H_MM
 
-    tmp_img_files = []  # 最後にまとめて削除する一時ファイル
+    tmp_img_files = []
 
     try:
         if include_cover:
@@ -273,21 +323,14 @@ def build_docx(property_name, pairs, output_path, cover_photo_path=None,
 
         total = len(pairs)
         for page_start in range(0, total, PAIRS_PER_PAGE):
-            # ---- 物件名(タイトル) ----
             title_p = doc.add_paragraph()
             if page_start > 0 or include_cover:
-                # 表の直後に doc.add_page_break() で改ページ用の段落を追加すると
-                # 表がページをほぼ埋めている状態と組み合わさり、Wordが
-                # 自動改行と手動改行の両方を行って空白ページが生まれることがある。
-                # そのため、次のタイトル段落自体に「ページ区切りしてから開始」の
-                # 属性を持たせることで、余分な段落を増やさずに改ページする。
                 title_p.paragraph_format.page_break_before = True
             title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             title_run = title_p.add_run(property_name)
             title_run.bold = True
             title_run.font.size = Pt(18)
 
-            # ---- 表の作成(1行目はラベル行) ----
             table = doc.add_table(rows=1, cols=3)
             table.alignment = WD_TABLE_ALIGNMENT.CENTER
             table.autofit = False
@@ -307,25 +350,26 @@ def build_docx(property_name, pairs, output_path, cover_photo_path=None,
             hr2.bold = True
             hr2.font.size = Pt(12)
 
-            # ---- 各ペアの行 ----
             chunk = pairs[page_start: page_start + PAIRS_PER_PAGE]
-            for before, after in chunk:
+            for pair in chunk:
+                before, after = pair[0], pair[1]
+                before_comment = pair[2] if len(pair) > 2 else ""
+                after_comment = pair[3] if len(pair) > 3 else ""
+
                 row = table.add_row()
                 row.height = Mm(row_h)
                 row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
                 _set_row_widths(row, widths)
                 cells = row.cells
 
-                # 施工前の画像(向き補正・圧縮した画像を写真エリア内に配置)
                 before_path, (bw, bh) = _prepare_image_for_docx(
                     before, col_w - 2 * pad, photo_zone_h - 2 * pad, tmp_img_files
                 )
                 p_before = cells[0].paragraphs[0]
                 _add_centered_picture(p_before, before_path, bw, bh)
-                _add_comment_area(cells[0], COMMENT_BOX_H_MM)
+                _add_comment_area(cells[0], COMMENT_BOX_H_MM, before_comment)
                 _set_vertical_center(cells[0])
 
-                # 中央の矢印
                 p_arrow = cells[1].paragraphs[0]
                 p_arrow.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 arrow_run = p_arrow.add_run("→")
@@ -333,14 +377,19 @@ def build_docx(property_name, pairs, output_path, cover_photo_path=None,
                 arrow_run.font.size = Pt(28)
                 _set_vertical_center(cells[1])
 
-                # 施工後の画像(同上)
                 after_path, (aw, ah) = _prepare_image_for_docx(
                     after, col_w - 2 * pad, photo_zone_h - 2 * pad, tmp_img_files
                 )
                 p_after = cells[2].paragraphs[0]
                 _add_centered_picture(p_after, after_path, aw, ah)
-                _add_comment_area(cells[2], COMMENT_BOX_H_MM)
+                _add_comment_area(cells[2], COMMENT_BOX_H_MM, after_comment)
                 _set_vertical_center(cells[2])
+
+        if extra_photos:
+            _add_extra_photos_pages(
+                doc, extra_title or "施工中画像", extra_photos, tmp_img_files,
+                first_page_break=(include_cover or total > 0),
+            )
 
         doc.save(output_path)
     finally:
