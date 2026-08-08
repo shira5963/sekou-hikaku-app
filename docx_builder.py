@@ -6,7 +6,7 @@ import os
 import tempfile
 
 from docx import Document
-from docx.shared import Mm, Pt
+from docx.shared import Mm, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
@@ -22,11 +22,24 @@ LABEL_H_MM = 8
 GAP_MM = 20  # 中央(矢印)列の幅
 PAIRS_PER_PAGE = 5
 
+# ---- 記入欄(コメント欄)の設定 : pdf_builder.py と揃えている ----
+COMMENT_BOX_H_MM = 11
+COMMENT_GAP_MM = 1.5
+COMMENT_FONT_PT = 10.5
+
+# ---- 画像圧縮の設定 ----
+# 写真は実際にWord上へ配置されるサイズを基準に、印刷でも見た目がほぼ変わらない
+# 解像度(200dpi)まで縮小してからJPEGで保存し、ファイルサイズを大幅に削減する
+IMAGE_DPI = 200
+JPEG_QUALITY = 85
+
 # ---- 表紙に記載する会社情報(固定文言) ----
 COMPANY_NAME = "株式会社インクコーポレーション"
 COMPANY_ADDRESS = "住所：東京都葛飾区立石8-39-6"
 COMPANY_TEL_FAX = "TEL：03-3697-9889　FAX：03-3697-9868"
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+
+MM_TO_PT = 2.83465
 
 
 def _load_image(img_path):
@@ -39,11 +52,37 @@ def _load_image(img_path):
     return im
 
 
-def _fit_size(im, max_w, max_h):
-    """画像の縦横比を保ったまま、指定した枠(max_w x max_h)に収まるサイズを計算する"""
-    w, h = im.size
+def _fit_size(size_or_im, max_w, max_h):
+    """画像の縦横比を保ったまま、指定した枠(max_w x max_h)に収まるサイズを計算する
+    size_or_im: (幅, 高さ)のタプル、またはPIL Imageオブジェクト"""
+    w, h = size_or_im.size if hasattr(size_or_im, "size") else size_or_im
     ratio = min(max_w / w, max_h / h)
     return w * ratio, h * ratio
+
+
+def _prepare_image_for_docx(img_path, max_w_mm, max_h_mm, tmp_files,
+                             dpi=IMAGE_DPI, quality=JPEG_QUALITY):
+    """画像を読み込み、向き補正(EXIF)をした上で、実際にWord上へ配置される
+    サイズ(mm)を基準に、印刷でも十分きれいに見える解像度(dpi)まで縮小し、
+    JPEGとして一時ファイルに保存する(ファイルサイズを大幅に削減するため)。
+
+    戻り値: (一時ファイルパス, (表示幅mm, 表示高さmm))
+    """
+    im = _load_image(img_path)
+    disp_w, disp_h = _fit_size(im, max_w_mm, max_h_mm)
+
+    target_px_w = max(1, round(disp_w / 25.4 * dpi))
+    target_px_h = max(1, round(disp_h / 25.4 * dpi))
+    if im.size[0] > target_px_w or im.size[1] > target_px_h:
+        im = im.resize((target_px_w, target_px_h), Image.LANCZOS)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+    im.save(tmp.name, format="JPEG", quality=quality, optimize=True)
+    tmp.close()
+    tmp_files.append(tmp.name)
+    im.close()
+
+    return tmp.name, (disp_w, disp_h)
 
 
 def _set_vertical_center(cell):
@@ -64,6 +103,36 @@ def _add_centered_picture(paragraph, img_path, width_mm, height_mm):
     paragraph.add_run().add_picture(img_path, width=Mm(width_mm), height=Mm(height_mm))
 
 
+def _add_paragraph_bottom_border(paragraph):
+    """段落の下部に罫線(記入用の線)を引く"""
+    pPr = paragraph._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "B4B4B4")
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+
+def _add_comment_area(cell, box_h_mm):
+    """写真の下に記入欄(ラベル+罫線の空欄)を追加する"""
+    p = cell.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    p.paragraph_format.space_before = Pt(COMMENT_GAP_MM * MM_TO_PT)
+    run = p.add_run("記入欄：")
+    run.font.size = Pt(COMMENT_FONT_PT)
+    run.font.color.rgb = RGBColor(150, 150, 150)
+    _add_paragraph_bottom_border(p)
+
+    # ラベル行だけでは箱として物足りないため、残りの高さ分を空白として確保する
+    label_line_mm = 5
+    remaining_mm = box_h_mm - label_line_mm
+    if remaining_mm > 0:
+        p.paragraph_format.space_after = Pt(remaining_mm * MM_TO_PT)
+
+
 def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_files):
     """表紙ページ(1ページ目)を作成する
 
@@ -76,19 +145,17 @@ def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_
     ブロック全体がページの上下中央に来るように調整している。
     """
     usable_w = PAGE_W_MM - 2 * MARGIN_MM
-    mm_to_pt = 2.83465
     LINE_MM = 8
-    line_pt = LINE_MM * mm_to_pt
+    line_pt = LINE_MM * MM_TO_PT
 
     # ---- 写真サイズを計算(現在(60%)の120% = 元サイズの72%) ----
     BASE_MAX_H_MM = 150
     max_w = usable_w * 0.72
     max_h = BASE_MAX_H_MM * 0.72
     if cover_photo_path:
-        cover_im = _load_image(cover_photo_path)
-        cw, ch = _fit_size(cover_im, max_w, max_h)
+        photo_path, (cw, ch) = _prepare_image_for_docx(cover_photo_path, max_w, max_h, tmp_img_files)
     else:
-        cover_im = None
+        photo_path = None
         cw, ch = 0, max_h * 0.7  # 写真がない場合も位置決めの基準として仮の高さを使う
 
     # ---- ロゴサイズを事前に計算(全体の高さ見積もりに使う) ----
@@ -115,7 +182,7 @@ def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_
     # ---- 物件名 ----
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_p.paragraph_format.space_before = Pt(center_offset_mm * mm_to_pt)
+    title_p.paragraph_format.space_before = Pt(center_offset_mm * MM_TO_PT)
     title_run = title_p.add_run(f"物件名　{property_name}")
     title_run.bold = False
     title_run.underline = True
@@ -130,21 +197,15 @@ def _add_cover_page(doc, property_name, cover_photo_path, contact_name, tmp_img_
 
     # ---- 写真(写真報告書の3行分下) ----
     if cover_photo_path:
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        cover_im.save(tmp.name)
-        tmp.close()
-        tmp_img_files.append(tmp.name)
-        cover_im.close()
-
         photo_p = doc.add_paragraph()
         photo_p.paragraph_format.space_before = Pt(3 * line_pt)
         photo_p.paragraph_format.space_after = Pt(3 * line_pt)
-        _add_centered_picture(photo_p, tmp.name, cw, ch)
+        _add_centered_picture(photo_p, photo_path, cw, ch)
     else:
         # 写真を入れない場合も、レイアウトの間隔だけは揃えておく
         spacer_p = doc.add_paragraph()
         spacer_p.paragraph_format.space_before = Pt(3 * line_pt)
-        spacer_p.paragraph_format.space_after = Pt(3 * line_pt + ch * mm_to_pt)
+        spacer_p.paragraph_format.space_after = Pt(3 * line_pt + ch * MM_TO_PT)
 
     # ---- ロゴ ----
     if os.path.exists(LOGO_PATH):
@@ -201,6 +262,9 @@ def build_docx(property_name, pairs, output_path, cover_photo_path=None,
     pad = 2
     widths = [col_w, GAP_MM, col_w]
 
+    # 各行の高さのうち、下部を記入欄に充て、残りを写真エリアとする
+    photo_zone_h = row_h - COMMENT_GAP_MM - COMMENT_BOX_H_MM
+
     tmp_img_files = []  # 最後にまとめて削除する一時ファイル
 
     try:
@@ -252,18 +316,13 @@ def build_docx(property_name, pairs, output_path, cover_photo_path=None,
                 _set_row_widths(row, widths)
                 cells = row.cells
 
-                # 施工前の画像
-                before_im = _load_image(before)
-                bw, bh = _fit_size(before_im, col_w - 2 * pad, row_h - 2 * pad)
-                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                before_im.save(tmp.name)
-                tmp.close()
-                tmp_img_files.append(tmp.name)
-                before_im.close()
-
+                # 施工前の画像(向き補正・圧縮した画像を写真エリア内に配置)
+                before_path, (bw, bh) = _prepare_image_for_docx(
+                    before, col_w - 2 * pad, photo_zone_h - 2 * pad, tmp_img_files
+                )
                 p_before = cells[0].paragraphs[0]
-                p_before.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p_before.add_run().add_picture(tmp.name, width=Mm(bw), height=Mm(bh))
+                _add_centered_picture(p_before, before_path, bw, bh)
+                _add_comment_area(cells[0], COMMENT_BOX_H_MM)
                 _set_vertical_center(cells[0])
 
                 # 中央の矢印
@@ -274,18 +333,13 @@ def build_docx(property_name, pairs, output_path, cover_photo_path=None,
                 arrow_run.font.size = Pt(28)
                 _set_vertical_center(cells[1])
 
-                # 施工後の画像
-                after_im = _load_image(after)
-                aw, ah = _fit_size(after_im, col_w - 2 * pad, row_h - 2 * pad)
-                tmp2 = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                after_im.save(tmp2.name)
-                tmp2.close()
-                tmp_img_files.append(tmp2.name)
-                after_im.close()
-
+                # 施工後の画像(同上)
+                after_path, (aw, ah) = _prepare_image_for_docx(
+                    after, col_w - 2 * pad, photo_zone_h - 2 * pad, tmp_img_files
+                )
                 p_after = cells[2].paragraphs[0]
-                p_after.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p_after.add_run().add_picture(tmp2.name, width=Mm(aw), height=Mm(ah))
+                _add_centered_picture(p_after, after_path, aw, ah)
+                _add_comment_area(cells[2], COMMENT_BOX_H_MM)
                 _set_vertical_center(cells[2])
 
         doc.save(output_path)

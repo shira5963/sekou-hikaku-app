@@ -15,6 +15,17 @@ TITLE_H = 15
 LABEL_H = 8
 PAIRS_PER_PAGE = 5
 
+# ---- 記入欄(コメント欄)の設定 ----
+COMMENT_BOX_H = 11  # mm 記入欄の高さ
+COMMENT_GAP = 1.5  # mm 写真と記入欄の間隔
+COMMENT_FONT_SIZE = 10.5  # 記入欄ラベルのフォントサイズ
+
+# ---- 画像圧縮の設定 ----
+# 写真は実際にA4上へ配置されるサイズを基準に、印刷でも見た目がほぼ変わらない
+# 解像度(200dpi)まで縮小してからJPEGで保存し、ファイルサイズを大幅に削減する
+IMAGE_DPI = 200
+JPEG_QUALITY = 85
+
 # ---- 日本語フォント設定 ----
 # fpdf2は標準では日本語を描画できないため、UTF-8対応のTTFフォントが必要です。
 # fonts/ フォルダに IPAexゴシック等のフォントファイルを配置してください。
@@ -57,35 +68,61 @@ class ReportPDF(FPDF):
         self.cell(col_w, LABEL_H, "施工後", align="C")
 
 
-def _load_image(img_path):
-    """画像を読み込み、EXIFの向き情報(スマホ撮影で付与される回転情報)を
-    ピクセルに反映してから返す。これによりPDF埋め込み時の意図しない回転を防ぐ"""
-    im = Image.open(img_path)
-    im = ImageOps.exif_transpose(im)  # EXIFの回転情報を実際のピクセルに反映
-    if im.mode not in ("RGB", "L"):
-        im = im.convert("RGB")
-    return im
-
-
-def _load_image_as_temp_png(img_path, tmp_files):
-    """向き補正した画像をPNGとして一時ファイルに保存し、そのパスを返す。
-    fpdf2はEXIF情報が残っていると独自にもう一度回転させてしまうため、
-    向き補正後に一度PNGとして保存し直すことでEXIF情報自体を取り除く"""
-    im = _load_image(img_path)
-    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-    im.save(tmp.name)
-    tmp.close()
-    tmp_files.append(tmp.name)
-    size = im.size
-    im.close()
-    return tmp.name, size
-
-
 def _fit_size(size, max_w, max_h):
     """画像の縦横比を保ったまま、指定した枠(max_w x max_h)に収まるサイズを計算する"""
     w, h = size
     ratio = min(max_w / w, max_h / h)
     return w * ratio, h * ratio
+
+
+def _prepare_image_for_pdf(img_path, max_w_mm, max_h_mm, tmp_files,
+                            dpi=IMAGE_DPI, quality=JPEG_QUALITY):
+    """画像を読み込み、向き補正(EXIF)をした上で、実際にPDF上へ配置される
+    サイズ(mm)を基準に、印刷でも十分きれいに見える解像度(dpi)まで縮小し、
+    JPEGとして一時ファイルに保存する。
+
+    スマホ写真をそのまま埋め込むと1枚数MBになりPDFが非常に重くなるため、
+    「表示サイズ×dpi」で必要十分なピクセル数まで落とすことでファイルサイズを
+    大幅に削減しつつ、印刷時の見た目はほぼ変わらないようにしている。
+
+    戻り値: (一時ファイルパス, (表示幅mm, 表示高さmm))
+    """
+    im = Image.open(img_path)
+    im = ImageOps.exif_transpose(im)  # EXIFの回転情報を実際のピクセルに反映
+    if im.mode not in ("RGB", "L"):
+        im = im.convert("RGB")
+
+    disp_w, disp_h = _fit_size(im.size, max_w_mm, max_h_mm)
+
+    # 表示サイズ(mm)を、指定dpiで必要なピクセル数に変換
+    target_px_w = max(1, round(disp_w / 25.4 * dpi))
+    target_px_h = max(1, round(disp_h / 25.4 * dpi))
+
+    # 元画像がそれより大きい場合のみ縮小する(小さい画像を無理に拡大しない)
+    if im.size[0] > target_px_w or im.size[1] > target_px_h:
+        im = im.resize((target_px_w, target_px_h), Image.LANCZOS)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+    im.save(tmp.name, format="JPEG", quality=quality, optimize=True)
+    tmp.close()
+    tmp_files.append(tmp.name)
+    im.close()
+
+    return tmp.name, (disp_w, disp_h)
+
+
+def _draw_comment_box(pdf, x, y, w, h):
+    """写真下の記入欄(枠線のみの空欄)を描画する"""
+    pdf.set_draw_color(180, 180, 180)
+    pdf.set_line_width(0.2)
+    pdf.rect(x, y, w, h)
+    pdf.set_font(FONT_NAME, "", COMMENT_FONT_SIZE)
+    pdf.set_text_color(150, 150, 150)
+    pdf.set_xy(x + 2, y + 1)
+    pdf.cell(w - 4, 5, "記入欄：", align="L")
+    # 色を元に戻しておく(以降の描画に影響しないように)
+    pdf.set_draw_color(0, 0, 0)
+    pdf.set_text_color(0, 0, 0)
 
 
 def draw_cover_page(pdf, property_name, cover_photo_path, contact_name, tmp_files):
@@ -107,8 +144,7 @@ def draw_cover_page(pdf, property_name, cover_photo_path, contact_name, tmp_file
     max_w = (PAGE_W - 2 * MARGIN) * 0.72
     max_h = 150 * 0.72  # 150mmは基準となる写真エリアの高さ
     if cover_photo_path:
-        photo_path, size = _load_image_as_temp_png(cover_photo_path, tmp_files)
-        pw, ph = _fit_size(size, max_w, max_h)
+        photo_path, (pw, ph) = _prepare_image_for_pdf(cover_photo_path, max_w, max_h, tmp_files)
     else:
         photo_path = None
         pw, ph = 0, max_h * 0.7  # 写真がない場合も位置決めの基準として仮の高さを使う
@@ -188,7 +224,10 @@ def build_pdf(property_name, pairs, output_path, cover_photo_path=None,
     row_h = (PAGE_H - 2 * MARGIN - TITLE_H - LABEL_H) / PAIRS_PER_PAGE
     pad = 2  # mm 画像とセル枠の間の余白
 
-    tmp_files = []  # 最後にまとめて削除する一時PNGファイル
+    # 各行の高さのうち、下部を記入欄に充て、残りを写真エリアとする
+    photo_zone_h = row_h - COMMENT_GAP - COMMENT_BOX_H
+
+    tmp_files = []  # 最後にまとめて削除する一時ファイル
 
     try:
         if include_cover:
@@ -206,28 +245,35 @@ def build_pdf(property_name, pairs, output_path, cover_photo_path=None,
 
             row_top = content_top + pos_in_page * row_h
 
-            # 施工前(EXIFの向きを補正し、PNGとして保存し直した画像を配置)
-            before_path, before_size = _load_image_as_temp_png(before, tmp_files)
-            bw, bh = _fit_size(before_size, col_w - 2 * pad, row_h - 2 * pad)
+            # 施工前(向き補正・圧縮した画像を写真エリア内に配置)
+            before_path, (bw, bh) = _prepare_image_for_pdf(
+                before, col_w - 2 * pad, photo_zone_h - 2 * pad, tmp_files
+            )
             bx = MARGIN + (col_w - bw) / 2
-            by = row_top + (row_h - bh) / 2
+            by = row_top + (photo_zone_h - bh) / 2
             pdf.image(before_path, x=bx, y=by, w=bw, h=bh)
 
             # 施工後(同上)
-            after_path, after_size = _load_image_as_temp_png(after, tmp_files)
-            aw, ah = _fit_size(after_size, col_w - 2 * pad, row_h - 2 * pad)
+            after_path, (aw, ah) = _prepare_image_for_pdf(
+                after, col_w - 2 * pad, photo_zone_h - 2 * pad, tmp_files
+            )
             ax = MARGIN + col_w + gap + (col_w - aw) / 2
-            ay = row_top + (row_h - ah) / 2
+            ay = row_top + (photo_zone_h - ah) / 2
             pdf.image(after_path, x=ax, y=ay, w=aw, h=ah)
 
-            # 中央の矢印(→)
-            arrow_y = row_top + row_h / 2
+            # 中央の矢印(→) : 写真エリアの高さを基準に中央に配置
+            arrow_y = row_top + photo_zone_h / 2
             arrow_x1 = MARGIN + col_w + 3
             arrow_x2 = MARGIN + col_w + gap - 3
             pdf.set_line_width(0.8)
             pdf.line(arrow_x1, arrow_y, arrow_x2, arrow_y)
             pdf.line(arrow_x2, arrow_y, arrow_x2 - 3, arrow_y - 2)
             pdf.line(arrow_x2, arrow_y, arrow_x2 - 3, arrow_y + 2)
+
+            # 記入欄(施工前・施工後それぞれの写真の下)
+            box_y = row_top + photo_zone_h + COMMENT_GAP
+            _draw_comment_box(pdf, MARGIN, box_y, col_w, COMMENT_BOX_H)
+            _draw_comment_box(pdf, MARGIN + col_w + gap, box_y, col_w, COMMENT_BOX_H)
 
         pdf.output(output_path)
     finally:
